@@ -2,6 +2,12 @@
 """
 CAN event replay tester for trained car-alarm CAN rules.
 
+V10 changes:
+  * keeps all V9 diagnostics and timing output;
+  * automatically creates report directories;
+  * when --report-json/--report-csv are not provided, saves reports to
+    reports/<root-name>/report.json and reports/<root-name>/report.csv.
+
 V9 changes:
   * keeps V8 millisecond timestamps on every console log line;
   * adds real replay elapsed time and slowdown factor for every TRC replay;
@@ -36,8 +42,11 @@ Requires:
 
 Example:
   python can_event_replay_tester.py --root kia --can-port COM7 --log-port COM8 \
-      --slcan-baud 115200 --log-baud 115200 --can-bitrate 500000 \
-      --report-json report.json --report-csv report.csv
+      --slcan-baud 115200 --log-baud 115200 --can-bitrate 500000
+
+Reports are saved automatically to:
+  reports/kia/report.json
+  reports/kia/report.csv
 """
 
 from __future__ import annotations
@@ -1071,9 +1080,35 @@ def print_result(result: TestResult) -> None:
             print(f"      log: {line}", flush=True)
 
 
+def safe_report_folder_name(root: Path) -> str:
+    """Return a filesystem-safe report folder name derived from --root.
+
+    For --root kia -> kia
+    For --root cars/kia -> kia
+    For --root . -> current directory name
+    """
+    name = root.name or root.resolve().name or "root"
+    # Windows-forbidden chars: < > : " / \ | ? * and control chars.
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", name).strip(" ._")
+    return name or "root"
+
+
+def configure_report_paths(args: argparse.Namespace, root: Path) -> None:
+    """Fill report paths from --root when explicit report paths are absent."""
+    if args.no_auto_report:
+        return
+    if args.report_json or args.report_csv:
+        return
+
+    report_dir = Path(args.report_base_dir) / safe_report_folder_name(root)
+    args.report_json = str(report_dir / "report.json")
+    args.report_csv = str(report_dir / "report.csv")
+
+
 def write_reports(results: list[TestResult], args: argparse.Namespace) -> None:
     if args.report_json:
         out = Path(args.report_json)
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(
             json.dumps([asdict(r) for r in results], indent=2, ensure_ascii=False),
             encoding="utf-8",
@@ -1082,6 +1117,7 @@ def write_reports(results: list[TestResult], args: argparse.Namespace) -> None:
 
     if args.report_csv:
         out = Path(args.report_csv)
+        out.parent.mkdir(parents=True, exist_ok=True)
         with out.open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(
                 f,
@@ -1164,8 +1200,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--quiet", action="store_true", help="Hide replay progress messages")
     p.add_argument("--stop-on-fail", action="store_true", help="Stop after first failed test")
     p.add_argument("--dry-run", action="store_true", help="Only parse folders/TRC files; do not open serial ports")
-    p.add_argument("--report-json", help="Optional JSON report path")
-    p.add_argument("--report-csv", help="Optional CSV report path")
+    p.add_argument("--report-json", help="Optional JSON report path. If omitted, auto path is reports/<root-name>/report.json")
+    p.add_argument("--report-csv", help="Optional CSV report path. If omitted, auto path is reports/<root-name>/report.csv")
+    p.add_argument("--report-base-dir", default="reports", help="Base directory for automatic reports. Default: reports")
+    p.add_argument("--no-auto-report", action="store_true", help="Do not auto-create reports/<root-name>/report.json and report.csv when report paths are omitted")
     p.add_argument("--keep-log-lines", type=int, default=20, help="How many matched log lines to keep in report")
     return p
 
@@ -1211,6 +1249,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("--state-open-expected must be >= 0", file=sys.stderr)
         return 2
 
+    configure_report_paths(args, root)
+
     folders = find_event_folders(root)
     if args.event:
         selected = set(args.event)
@@ -1228,6 +1268,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     for f in folders:
         kind = "button" if f.is_button else "state"
         print(f"  event {f.event_id:>2}: {kind:6} {f.path}", flush=True)
+    if args.report_json or args.report_csv:
+        print(f"Reports directory: {Path(args.report_json or args.report_csv).parent}", flush=True)
+        if args.report_json:
+            print(f"  JSON: {args.report_json}", flush=True)
+        if args.report_csv:
+            print(f"  CSV:  {args.report_csv}", flush=True)
     print(flush=True)
 
     slcan: Optional[SlcanSender] = None
